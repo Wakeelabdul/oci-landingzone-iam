@@ -1,0 +1,202 @@
+###############################################################################
+# GitHub Actions - Terraform OCI IAM
+#
+# Flow:
+#   Pull request  -> validate + plan        (plan shown in the job summary)
+#   Push to main  -> validate + plan + apply (apply waits for approval via the
+#                                             "production" environment)
+#   Manual run    -> Actions tab > "Terraform OCI IAM" > Run workflow
+#
+# State: kept in an OCI Object Storage bucket. Each job pulls it at the start;
+#        the apply job pushes it back ALWAYS (even if apply fails part-way).
+#        No state or plan files are uploaded as GitHub artifacts.
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   OCI_TENANCY_OCID     OCI_USER_OCID      OCI_FINGERPRINT
+#   OCI_REGION           (home region, e.g. us-ashburn-1)
+#   OCI_PRIVATE_KEY      (full contents of the API key .pem file)
+#   OCI_STATE_BUCKET     OCI_STATE_NAMESPACE
+# Optional secret:
+#   OCI_STATE_REGION     (region of the state bucket, defaults to OCI_REGION)
+###############################################################################
+
+name: Terraform OCI IAM
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: "1.9.8"
+  TF_IN_AUTOMATION: "true"
+  STATE_KEY: "iam/terraform.tfstate"
+  # Terraform input variables (variables.tf)
+  TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
+  TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}
+  TF_VAR_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
+  TF_VAR_region: ${{ secrets.OCI_REGION }}
+  TF_VAR_private_key_path: /home/runner/.oci/oci_api_key.pem
+  # State bucket
+  OCI_STATE_BUCKET: ${{ secrets.OCI_STATE_BUCKET }}
+  OCI_STATE_NAMESPACE: ${{ secrets.OCI_STATE_NAMESPACE }}
+  OCI_STATE_REGION: ${{ secrets.OCI_STATE_REGION || secrets.OCI_REGION }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Format + syntax check (no credentials needed)
+  # ---------------------------------------------------------------------------
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: Terraform init (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+  # ---------------------------------------------------------------------------
+  # 2. Plan against the current state
+  #    Skipped for PRs from forks (forks never receive secrets).
+  # ---------------------------------------------------------------------------
+  plan:
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure OCI CLI
+        env:
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+        run: |
+          pip install oci-cli --quiet
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_PRIVATE_KEY" > "${TF_VAR_private_key_path}"
+          chmod 600 "${TF_VAR_private_key_path}"
+          cat > ~/.oci/config << EOF
+          [DEFAULT]
+          user=${TF_VAR_user_ocid}
+          fingerprint=${TF_VAR_fingerprint}
+          key_file=${TF_VAR_private_key_path}
+          tenancy=${TF_VAR_tenancy_ocid}
+          region=${OCI_STATE_REGION}
+          EOF
+          chmod 600 ~/.oci/config
+
+      - name: Pull state from Object Storage
+        run: |
+          # Fails if credentials/bucket are wrong (avoids a "fresh start" by mistake)
+          oci os bucket get --bucket-name "$OCI_STATE_BUCKET" --namespace "$OCI_STATE_NAMESPACE" > /dev/null
+          if oci os object head --bucket-name "$OCI_STATE_BUCKET" --namespace "$OCI_STATE_NAMESPACE" --name "$STATE_KEY" > /dev/null 2>&1; then
+            oci os object get --bucket-name "$OCI_STATE_BUCKET" --namespace "$OCI_STATE_NAMESPACE" --name "$STATE_KEY" --file terraform.tfstate
+            echo "Existing state downloaded"
+          else
+            echo "No existing state found - first run"
+          fi
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        run: |
+          terraform plan -input=false -no-color -out=tfplan
+          {
+            echo '### Terraform plan'
+            echo '```'
+            terraform show -no-color tfplan | tail -c 60000
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 3. Apply (main branch only, after approval on the "production" environment)
+  #    concurrency = only one apply runs at a time (protects the state file)
+  # ---------------------------------------------------------------------------
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment: production
+    concurrency:
+      group: oci-iam-state
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure OCI CLI
+        env:
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+        run: |
+          pip install oci-cli --quiet
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_PRIVATE_KEY" > "${TF_VAR_private_key_path}"
+          chmod 600 "${TF_VAR_private_key_path}"
+          cat > ~/.oci/config << EOF
+          [DEFAULT]
+          user=${TF_VAR_user_ocid}
+          fingerprint=${TF_VAR_fingerprint}
+          key_file=${TF_VAR_private_key_path}
+          tenancy=${TF_VAR_tenancy_ocid}
+          region=${OCI_STATE_REGION}
+          EOF
+          chmod 600 ~/.oci/config
+
+      - name: Pull state from Object Storage
+        run: |
+          oci os bucket get --bucket-name "$OCI_STATE_BUCKET" --namespace "$OCI_STATE_NAMESPACE" > /dev/null
+          if oci os object head --bucket-name "$OCI_STATE_BUCKET" --namespace "$OCI_STATE_NAMESPACE" --name "$STATE_KEY" > /dev/null 2>&1; then
+            oci os object get --bucket-name "$OCI_STATE_BUCKET" --namespace "$OCI_STATE_NAMESPACE" --name "$STATE_KEY" --file terraform.tfstate
+          else
+            echo "No existing state found - first run"
+          fi
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform apply
+        run: terraform apply -input=false -auto-approve
+
+      # Runs even if apply failed, so partially created resources stay in state
+      - name: Push state to Object Storage
+        if: always()
+        run: |
+          if [ -s terraform.tfstate ]; then
+            oci os object put --bucket-name "$OCI_STATE_BUCKET" --namespace "$OCI_STATE_NAMESPACE" \
+              --name "$STATE_KEY" --file terraform.tfstate --force
+            echo "State uploaded"
+          else
+            echo "No state file to upload"
+          fi
