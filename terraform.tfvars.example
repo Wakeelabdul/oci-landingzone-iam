@@ -1,0 +1,8 @@
+# For LOCAL runs only. Copy to terraform.tfvars (git-ignored) and fill in.
+# In GitHub Actions these come from repository secrets instead.
+
+tenancy_ocid     = "ocid1.tenancy.oc1..<your-tenancy-ocid>"
+user_ocid        = "ocid1.user.oc1..<your-user-ocid>"
+fingerprint      = "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+private_key_path = "~/.oci/oci_api_key.pem"
+region           = "us-ashburn-1"
