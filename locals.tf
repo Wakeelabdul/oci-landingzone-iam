@@ -48,9 +48,9 @@ locals {
     support_admins = { name = "support-admins", description = "Raise and manage Oracle Support SRs" }
 
     # --- Environment-specific groups (repeat the pattern per env) ---
-    dev_developers  = { name = "app-dev-developers", description = "Manage resources in DEV compartment" }
-    uat_developers  = { name = "app-uat-developers", description = "Use resources in UAT compartment" }
-    prod_operators  = { name = "app-prod-operators", description = "Operate (use/read) resources in PROD" }
+    dev_developers = { name = "app-dev-developers", description = "Manage resources in DEV compartment" }
+    uat_developers = { name = "app-uat-developers", description = "Use resources in UAT compartment" }
+    prod_operators = { name = "app-prod-operators", description = "Operate (use/read) resources in PROD" }
 
     # --- Service account groups (for API keys / CI-CD pipelines) ---
     cicd_svc = { name = "svc-cicd", description = "CI/CD pipeline service account" }
