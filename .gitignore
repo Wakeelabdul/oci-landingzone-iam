@@ -1,0 +1,18 @@
+# Terraform working files
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+*.tfplan
+crash.log
+
+# Local variable values (may contain OCIDs)
+terraform.tfvars
+*.auto.tfvars
+
+# Keys
+*.pem
+.oci/
+
+# Keep the provider lock file committed
+!.terraform.lock.hcl
