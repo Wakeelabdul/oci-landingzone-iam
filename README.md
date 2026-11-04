@@ -27,7 +27,7 @@ locally or through a GitHub Actions pipeline (validate → plan on PR → approv
 ## Quick start
 
 ```bash
-git clone https://github.com/<your-user>/oci-landing-zone-iam.git
+git clone https://github.com/Wakeelabdul/oci-landing-zone-iam.git
 cd oci-landing-zone-iam
 
 # 1. Credentials
